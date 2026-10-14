@@ -2,8 +2,8 @@
 
 A mobile-first 3D simulator of a 6-axis industrial robot arm. You can jog it axis by axis or in Cartesian space, drive it by dragging an inverse-kinematics target, pick and place parts with a parallel gripper, and teach and replay programs. It is built for a phone held in portrait (tuned for an iPhone 17 Pro Max), and it also works in landscape and on desktop.
 
-**Live:** https://claude.ai/artifact/6ehqDvQJhHBG3ymPusD3Wz
-(GitHub Pages also works once Pages is enabled for the repo; see [Deploying](#deploying).)
+**Live:** https://brianjleepub.github.io/Roboticarmsim/ (GitHub Pages, deployed from `main`)
+**Mirror:** https://claude.ai/artifact/6ehqDvQJhHBG3ymPusD3Wz (claude.ai Artifact, private to the owner unless shared)
 
 ## Using it
 
@@ -82,5 +82,5 @@ npm run dev       # rebuild on change
 ## Deploying
 
 - **claude.ai Artifact** (the live link above): publish `dist/artifact.html` with `dist/app.js` alongside it.
-- **GitHub Pages:** `.github/workflows/pages.yml` builds and deploys `dist/` on every push to `main`. Enable it once under *Settings → Pages → Source: GitHub Actions*.
+- **GitHub Pages:** `.github/workflows/pages.yml` runs the tests, builds and deploys `dist/` on every push to `main` (Pages source is set to *GitHub Actions*). It can also be started by hand from the Actions tab (*Run workflow*).
 - **Any static host:** `dist/index.html` is a single self-contained file.
