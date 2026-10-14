@@ -1,11 +1,15 @@
-// Robot controller: motion queue (PTP / LIN / gripper / wait), jogging, live IK follow,
-// workspace guarding and the high-level pick-and-place routine.
+// Robot controller: motion queue (PTP / LIN / gripper / wait / zone interlock), jogging,
+// live IK follow, workspace guarding and the high-level pick-and-place routine.
+//
+// Each controller drives one arm whose base sits somewhere in the cell. Kinematics run in the
+// arm's own base frame; everything the rest of the app passes in or reads out (poses, part
+// positions, jog directions) is in the shared cell frame and converted here.
 import {
-  fk, ik, HOME, LIMITS, VMAX, DEG, GEO, toolDown, rotX, rotY, rotZ, mul, rotAxis,
+  fk, ik, HOME, LIMITS, VMAX, DEG, GEO, toolDown, rotX, rotY, rotZ, mul, mulv, transpose, rotAxis,
   matToQuat, quatToMat, slerp, rotAngle,
 } from './kinematics.js';
 import { GRIPPER_MAX_GAP } from './robot.js';
-import { TABLE, FLOOR_Z } from './scene.js';
+import { TABLE, FLOOR_Z, ROBOT_BASES, CONVEYOR, BIN } from './scene.js';
 
 const LIN_V = 0.9; // m/s at 100 %
 const LIN_W = 200 * DEG; // rad/s at 100 %
@@ -18,10 +22,22 @@ const GRIP_SPEED = 0.22; // m/s finger travel
 const ease = (s) => s * s * s * (10 + s * (-15 + 6 * s));
 const PEAK = 1.875;
 
+// A shared area only one arm may work in at a time (the transfer tray).
+export class Zone {
+  constructor(name) { this.name = name; this.owner = null; }
+}
+
 export class Controller {
-  constructor({ robot, parts }) {
+  constructor({ robot, parts, base = ROBOT_BASES[0], name = 'Robot 1' }) {
     this.robot = robot;
     this.parts = parts;
+    this.name = name;
+    this.base = base;
+    this.Rb = rotZ(base.yaw);
+    this.RbT = transpose(this.Rb);
+    this.owned = new Set();
+    robot.root.position.set(base.x, base.y, 0);
+    robot.root.rotation.set(0, 0, base.yaw);
     this.q = HOME.slice();
     this.gap = GRIPPER_MAX_GAP;
     this.held = null;
@@ -47,12 +63,24 @@ export class Controller {
   }
 
   get busy() { return !!this.active || this.queue.length > 0; }
-  pose() { return fk(this.q); }
+
+  // ---------- frame conversion (cell <-> this arm's base) ----------
+  toLocalP(p) { return mulv(this.RbT, [p[0] - this.base.x, p[1] - this.base.y, p[2]]); }
+  toCellP(p) { const v = mulv(this.Rb, p); return [v[0] + this.base.x, v[1] + this.base.y, v[2]]; }
+  toLocalR(R) { return mul(this.RbT, R); }
+  toCellR(R) { return mul(this.Rb, R); }
+  // TCP pose in the cell frame
+  pose(q = this.q) {
+    const f = fk(q);
+    return { p: this.toCellP(f.p), R: this.toCellR(f.R), flange: this.toCellP(f.flange), wrist: this.toCellP(f.wrist) };
+  }
+  ikCell(p, R, qRef = this.q) { return ik(this.toLocalP(p), this.toLocalR(R), qRef); }
+  canReach(x, y, z, yaw = 0) { return !!this.ikCell([x, y, z], toolDown(yaw), HOME); }
 
   // ---------- workspace guard ----------
-  // Returns null if the configuration is clear of the table, floor and robot base.
+  // Returns null if the configuration is clear of the table, floor, conveyor, bin and both bases.
   collision(q) {
-    const f = fk(q);
+    const f = this.pose(q);
     const x = [f.R[0], f.R[3], f.R[6]];
     const tip = [f.p[0] + x[0] * 0.015, f.p[1] + x[1] * 0.015, f.p[2] + x[2] * 0.015];
     // finger-tip corners spread along the finger travel axis
@@ -65,7 +93,13 @@ export class Controller {
       const overTable = p[0] > TABLE.x0 - 0.01 && p[0] < TABLE.x1 + 0.01 && p[1] > TABLE.y0 - 0.01 && p[1] < TABLE.y1 + 0.01;
       if (overTable && p[2] < -0.001) return 'table';
       if (p[2] < FLOOR_Z + 0.01) return 'floor';
-      if (Math.hypot(p[0], p[1]) < 0.24 && p[2] < 0.3) return 'robot base';
+      for (const b of ROBOT_BASES) {
+        if (Math.hypot(p[0] - b.x, p[1] - b.y) < 0.24 && p[2] < 0.3) return b === this.base ? 'robot base' : 'other robot';
+      }
+      const overBelt = Math.abs(p[0] - CONVEYOR.x) < CONVEYOR.width / 2 + 0.03 && p[1] < CONVEYOR.y0 + 0.04 && p[1] > CONVEYOR.y1 - 0.04;
+      if (overBelt && p[2] < CONVEYOR.z - 0.001) return 'conveyor';
+      const overBin = Math.abs(p[0] - BIN.x) < BIN.sx / 2 + BIN.wall && Math.abs(p[1] - BIN.y) < BIN.sy / 2 + BIN.wall;
+      if (overBin && p[2] < BIN.top) return 'bin';
     }
     return null;
   }
@@ -76,10 +110,16 @@ export class Controller {
     this.queue.push(...cmds);
   }
 
+  releaseZones() {
+    for (const z of this.owned) if (z.owner === this) z.owner = null;
+    this.owned.clear();
+  }
+
   stop(reason) {
     this.queue = [];
     this.active = null;
     this.jog = null;
+    this.releaseZones();
     if (reason) this.setStatus(reason, 'warn');
     this.emit('stopped');
   }
@@ -91,6 +131,7 @@ export class Controller {
       this.active = null;
       this.jog = null;
       this.follow = null;
+      this.releaseZones();
       this.setStatus('Emergency stop. Release E-stop to continue.', 'error');
       this.emit('stopped');
     } else {
@@ -102,6 +143,8 @@ export class Controller {
   fault(text) {
     this.queue = [];
     this.active = null;
+    this.releaseZones();
+    this.emit('fault', text);
     this.setStatus(text, 'error');
     this.emit('stopped');
   }
@@ -112,7 +155,7 @@ export class Controller {
     if (c.type === 'ptp') {
       let qT = c.q;
       if (!qT) {
-        qT = ik(c.pose.p, c.pose.R, q0);
+        qT = this.ikCell(c.pose.p, c.pose.R, q0);
         if (!qT) return this.fault(`${c.label || 'Target'} is out of reach.`);
       }
       c.q0 = q0;
@@ -122,16 +165,18 @@ export class Controller {
       for (let i = 0; i < 6; i++) T = Math.max(T, (PEAK * Math.abs(qT[i] - q0[i])) / (VMAX[i] * sp));
       c.T = T;
     } else if (c.type === 'lin') {
+      // interpolate in the base frame; the straight line is the same in either frame
       const f = fk(q0);
+      c.lp = { p: this.toLocalP(c.pose.p), R: this.toLocalR(c.pose.R) };
       c.p0 = f.p;
       c.R0 = f.R;
       c.q0r = matToQuat(f.R);
-      c.q1r = matToQuat(c.pose.R);
-      const d = Math.hypot(c.pose.p[0] - f.p[0], c.pose.p[1] - f.p[1], c.pose.p[2] - f.p[2]);
-      const a = rotAngle(f.R, c.pose.R);
+      c.q1r = matToQuat(c.lp.R);
+      const d = Math.hypot(c.lp.p[0] - f.p[0], c.lp.p[1] - f.p[1], c.lp.p[2] - f.p[2]);
+      const a = rotAngle(f.R, c.lp.R);
       const sp = this.override * (c.speed ?? 1);
       c.T = Math.max(0.2, (PEAK * d) / (LIN_V * sp), (PEAK * a) / (LIN_W * sp));
-      if (!ik(c.pose.p, c.pose.R, q0)) return this.fault(`${c.label || 'LIN target'} is out of reach.`);
+      if (!ik(c.lp.p, c.lp.R, q0)) return this.fault(`${c.label || 'LIN target'} is out of reach.`);
     } else if (c.type === 'grip') {
       this.robot.setJoints(this.q); // make sure the TCP transform is current for the part check
       if (c.close) {
@@ -165,7 +210,7 @@ export class Controller {
     }
     if (c.type === 'lin') {
       const s = ease(Math.min(1, c.t / c.T));
-      const p = c.p0.map((v, i) => v + (c.pose.p[i] - v) * s);
+      const p = c.p0.map((v, i) => v + (c.lp.p[i] - v) * s);
       const R = quatToMat(slerp(c.q0r, c.q1r, s));
       const q = ik(p, R, this.q);
       if (!q) return this.fault('LIN path leaves the workspace.');
@@ -194,6 +239,22 @@ export class Controller {
       return false;
     }
     if (c.type === 'wait') return c.t >= c.T;
+    if (c.type === 'acquire') {
+      // interlock: hold here until the shared zone is free
+      const z = c.zone;
+      if (!z.owner || z.owner === this) {
+        z.owner = this;
+        this.owned.add(z);
+        return true;
+      }
+      this.setStatus(`Waiting for the ${z.name} (in use by ${z.owner.name})`, 'info');
+      return false;
+    }
+    if (c.type === 'release') {
+      if (c.zone.owner === this) c.zone.owner = null;
+      this.owned.delete(c.zone);
+      return true;
+    }
     if (c.type === 'call') { c.fn(); return true; }
     return true;
   }
@@ -216,7 +277,7 @@ export class Controller {
       this.q = q;
       return;
     }
-    // Cartesian jog in world (base) or tool frame
+    // Cartesian jog in world (cell) or tool frame, solved in the base frame
     const f = fk(this.q);
     let p = f.p.slice();
     let R = f.R;
@@ -227,11 +288,11 @@ export class Controller {
       if (axis < 3) {
         const e = [0, 0, 0];
         e[axis] = 1;
-        const d = frame === 'tool' ? [R[axis], R[3 + axis], R[6 + axis]] : e;
+        const d = frame === 'tool' ? [R[axis], R[3 + axis], R[6 + axis]] : mulv(this.RbT, e);
         pp = [p[0] + d[0] * step * scale, p[1] + d[1] * step * scale, p[2] + d[2] * step * scale];
       } else {
         const rot = [rotZ, rotY, rotX][axis - 3]; // A about Z, B about Y, C about X
-        RR = frame === 'tool' ? mul(R, rot(step * scale)) : mul(rot(step * scale), R);
+        RR = frame === 'tool' ? mul(R, rot(step * scale)) : mul(mul(this.RbT, mul(rot(step * scale), this.Rb)), R);
       }
       return [pp, RR, ik(pp, RR, this.q)];
     };
@@ -253,7 +314,7 @@ export class Controller {
   // ---------- live IK follow ----------
   followStep(dt) {
     const { p, R } = this.follow;
-    const goal = ik(p, R, this.q);
+    const goal = this.ikCell(p, R, this.q);
     if (!goal) {
       if (this.followOk) this.setStatus('Target out of reach.', 'warn');
       this.followOk = false;
@@ -311,20 +372,23 @@ export class Controller {
     this.enqueue({ type: 'grip', close });
   }
 
-  // ---------- high-level pick & place ----------
+  // ---------- high-level pick & place (all positions in the cell frame) ----------
   graspPose(part) {
     const pos = part.mesh.position;
+    // direction from this arm's base to the part
+    const radial = Math.atan2(pos.y - this.base.y, pos.x - this.base.x);
     let yaw = this.parts.yawOf(part);
-    if (part.kind === 'cyl') yaw = Math.atan2(pos.y, pos.x);
+    if (part.kind === 'cyl') yaw = radial;
     // fold to the symmetric equivalent closest to the radial direction (keeps A6 calm)
-    const radial = Math.atan2(pos.y, pos.x);
     const period = Math.PI / 2;
     yaw = radial + (((yaw - radial) % period) + period * 1.5) % period - period / 2;
     const top = pos.z + part.h / 2;
     return { x: pos.x, y: pos.y, zGrip: top - 0.024, yaw, top };
   }
 
-  pickAndPlace(part, dest, { home = false } = {}) {
+  // pickZone / placeZone: interlocked area the pick or the place happens in. The arm
+  // acquires it before moving over it and frees it once it has moved clear.
+  pickAndPlace(part, dest, { home = false, pickZone = null, placeZone = null } = {}) {
     if (this.estop || part.state !== 'rest') return false;
     const g = this.graspPose(part);
     const clear = Math.max(g.top, 0.05) + 0.1;
@@ -337,8 +401,9 @@ export class Controller {
     const cmds = [];
     if (this.held) cmds.push({ type: 'grip', close: false });
     else if (this.gap < GRIPPER_MAX_GAP - 1e-4) cmds.push({ type: 'grip', close: false });
+    if (pickZone) cmds.push({ type: 'acquire', zone: pickZone });
     cmds.push(
-      { type: 'ptp', pose: { p: [g.x, g.y, clear], R: Rg }, label: 'Approach', onStart: () => this.setStatus(`Picking ${part.name.toLowerCase()}`, 'info') },
+      { type: 'ptp', pose: { p: [g.x, g.y, clear], R: Rg }, label: 'Approach', onStart: () => this.setStatus(`${this.name}: picking ${part.name.toLowerCase()}`, 'info') },
       { type: 'lin', pose: { p: [g.x, g.y, g.zGrip], R: Rg }, speed: 0.45, label: 'Grasp' },
       { type: 'grip', close: true },
       {
@@ -348,12 +413,20 @@ export class Controller {
         },
       },
       { type: 'lin', pose: { p: [g.x, g.y, clear], R: Rg }, label: 'Retract' },
-      { type: 'ptp', pose: { p: [dest.x, dest.y, placeClear], R: Rp }, label: 'Place approach', onStart: () => this.setStatus(`Placing ${part.name.toLowerCase()}`, 'info') },
+    );
+    if (placeZone) cmds.push({ type: 'acquire', zone: placeZone });
+    cmds.push(
+      { type: 'ptp', pose: { p: [dest.x, dest.y, placeClear], R: Rp }, label: 'Place approach', onStart: () => this.setStatus(`${this.name}: placing ${part.name.toLowerCase()}`, 'info') },
+    );
+    // moved away from the pick zone: the other arm may go in now
+    if (pickZone && pickZone !== placeZone) cmds.push({ type: 'release', zone: pickZone });
+    cmds.push(
       { type: 'lin', pose: { p: [dest.x, dest.y, zPlace], R: Rp }, speed: 0.4, label: 'Place' },
       { type: 'grip', close: false },
       { type: 'lin', pose: { p: [dest.x, dest.y, placeClear], R: Rp }, label: 'Depart' },
     );
-    if (home) cmds.push({ type: 'ptp', q: HOME.slice(), label: 'Home' });
+    if (home || placeZone) cmds.push({ type: 'ptp', q: HOME.slice(), label: 'Home' });
+    if (placeZone) cmds.push({ type: 'release', zone: placeZone });
     this.enqueue(...cmds);
     return true;
   }

@@ -1,6 +1,6 @@
 <title>RX-6 Robot Cell</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<meta name="description" content="Mobile-first 3D simulator of a six-axis industrial robot arm: jog, drive with inverse kinematics, pick and place.">
+<meta name="description" content="Mobile-first 3D simulator of a two-robot six-axis cell: jog, drive with inverse kinematics, hand parts over through a shared tray and run them down a conveyor into a bin.">
 <meta name="theme-color" content="#14171b">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -81,6 +81,7 @@ button { touch-action: manipulation; }
   font-family: var(--font-num); font-size: 11px; display: grid; grid-template-columns: auto auto; column-gap: 12px; row-gap: 2px; font-variant-numeric: tabular-nums;
 }
 .hud .k { color: var(--muted); }
+.hud .ht { grid-column: 1 / -1; font-family: var(--font-ui); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); border-bottom: 1px solid var(--line); padding-bottom: 3px; margin-bottom: 2px; }
 .hud .grip { grid-column: 1 / -1; color: var(--muted); border-top: 1px solid var(--line); padding-top: 4px; margin-top: 2px; font-family: var(--font-ui); font-size: 12px; letter-spacing: .04em; }
 .hud .grip b { color: var(--fg); }
 .views {
@@ -108,6 +109,8 @@ button { touch-action: manipulation; }
 .tabs button { height: 36px; border: 0; border-radius: 9px; background: none; font-weight: 600; font-size: 15px; color: var(--muted); letter-spacing: .02em; cursor: pointer; }
 .tabs button[aria-selected="true"] { background: var(--raise-hi); color: var(--fg); }
 .ovr { display: flex; align-items: center; gap: 10px; padding: 8px 2px 4px; flex: none; }
+.ovr .seg { flex: none; padding: 2px; }
+.ovr .seg button { height: 30px; min-width: 40px; padding: 0 8px; font-size: 14px; }
 .ovr label { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 600; flex: none; }
 .ovr output { font-family: var(--font-num); font-size: 13px; width: 44px; text-align: right; flex: none; }
 input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 28px; }
@@ -159,6 +162,9 @@ input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 
 .part span { display: flex; flex-direction: column; min-width: 0; }
 .part b { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .part small { font-size: 12px; color: var(--muted); }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; background: var(--bg); border-radius: 10px; padding: 6px; font-size: 12px; color: var(--muted); letter-spacing: .04em; text-align: center; }
+.stats span { display: flex; flex-direction: column; gap: 1px; }
+.stats b { font-family: var(--font-num); font-size: 16px; color: var(--fg); font-weight: 500; }
 .c-red { background: #d23b33; } .c-yellow { background: #f0b21b; } .c-blue { background: #2f6fd6; }
 
 .prog { display: flex; flex-direction: column; gap: 4px; counter-reset: step; }
@@ -210,7 +216,8 @@ input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 
     <button class="chipbtn" id="vTool" aria-pressed="false">Tool</button>
   </div>
 
-  <div class="hud" id="hud" aria-label="Tool centre point">
+  <div class="hud" id="hud" aria-label="Tool centre point of the selected robot, in cell coordinates">
+    <span class="ht" id="hRobot">Robot 1</span>
     <span class="k">X</span><span id="hX">0.0</span>
     <span class="k">Y</span><span id="hY">0.0</span>
     <span class="k">Z</span><span id="hZ">0.0</span>
@@ -231,6 +238,10 @@ input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 
       <button role="tab" id="t-prog" aria-selected="false" data-pane="p-prog">Program</button>
     </nav>
     <div class="ovr">
+      <div class="seg" id="robotSel" role="group" aria-label="Robot to control">
+        <button aria-pressed="true" data-r="0">R1</button>
+        <button aria-pressed="false" data-r="1">R2</button>
+      </div>
       <label for="override">Speed</label>
       <input type="range" id="override" min="5" max="100" step="5" value="60">
       <output id="ovrOut" for="override">60%</output>
@@ -281,11 +292,13 @@ input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 
     </div>
 
     <div class="pane" id="p-pick" role="tabpanel" hidden>
-      <p class="hint" id="pickHint"><b>1.</b> Tap a part (in the view or below). <b>2.</b> Tap a tray or a spot on the table.</p>
-      <div class="parts" id="partList"></div>
       <div class="row">
-        <button class="btn primary" id="sortBtn">Sort all by colour</button>
+        <button class="btn primary" id="lineBtn">Run line</button>
+        <button class="btn" id="sortBtn">Sort by colour</button>
       </div>
+      <div class="stats" id="lineStats" aria-label="Where the parts are"></div>
+      <p class="hint" id="pickHint"><b>1.</b> Tap a part. <b>2.</b> Tap a tray, the conveyor or a spot on the table.</p>
+      <div class="parts" id="partList"></div>
       <div class="row">
         <button class="btn" id="resetParts">Reset parts</button>
         <button class="btn danger" id="stopBtn">Stop</button>
