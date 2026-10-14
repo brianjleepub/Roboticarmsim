@@ -1,5 +1,5 @@
-// Renderer, lighting and the static work cell (floor, riser, table, trays, fence, props).
-// The cell group is Z-up with its origin on the robot mounting plate, same as kinematics.js.
+// Renderer, lighting and the static work cell (floor, risers, table, trays, conveyor, bin, fence).
+// The cell group is Z-up with its origin on robot 1's mounting plate, same as kinematics.js.
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
@@ -7,14 +7,28 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export const RISER_H = 0.75; // robot mount and table top height above the floor
 export const FLOOR_Z = -RISER_H;
-export const TABLE = { x0: 0.3, x1: 1.02, y0: -0.78, y1: 0.78 };
-
-export const TRAY_DEFS = [
-  { id: 'red', label: 'Red', color: 0xc8352e, x: 0.42, y: 0.56 },
-  { id: 'yellow', label: 'Yellow', color: 0xe0a816, x: 0.76, y: 0.52 },
-  { id: 'blue', label: 'Blue', color: 0x2c64c8, x: 0.6, y: -0.56 },
+// Two identical arms face each other across one table. Robot 2 is turned 180° about Z.
+export const ROBOT_BASES = [
+  { x: 0, y: 0, yaw: 0 },
+  { x: 1.7, y: 0, yaw: Math.PI },
 ];
+export const TABLE = { x0: 0.3, x1: 1.42, y0: -0.78, y1: 0.78 };
+
 export const TRAY_INNER = 0.21;
+export const TRAY_DEFS = [
+  { id: 'red', label: 'Red', color: 0xc8352e, x: 0.42, y: 0.56, inner: TRAY_INNER },
+  { id: 'yellow', label: 'Yellow', color: 0xe0a816, x: 0.74, y: 0.54, inner: TRAY_INNER },
+  { id: 'blue', label: 'Blue', color: 0x2c64c8, x: 0.6, y: -0.56, inner: TRAY_INNER },
+  // shared transfer tray in the middle, reachable by both arms
+  { id: 'transfer', label: 'Transfer', color: 0x2f8a64, x: 0.88, y: 0, inner: 0.25, shared: true },
+];
+
+// Belt conveyor on robot 2's side. Parts travel toward -Y and drop into the bin.
+export const CONVEYOR = {
+  x: 1.2, width: 0.16, y0: -0.3, y1: -1.2, z: 0.07, speed: 0.14,
+  infeed: [1.2, -0.4], // where robot 2 sets parts down
+};
+export const BIN = { x: 1.2, y: -1.39, sx: 0.42, sy: 0.44, wall: 0.015, floor: FLOOR_Z + 0.06, top: -0.22 };
 export const TRAY_FLOOR = 0.012;
 const TRAY_WALL_H = 0.045;
 
@@ -149,12 +163,12 @@ export function createWorld(renderer) {
   scene.add(hemi);
 
   const key = new THREE.DirectionalLight(0xfff3e2, 2.6);
-  key.position.set(2.4, 5.2, 2.8);
-  key.target.position.set(0.3, 0.6, 0);
+  key.position.set(3.0, 5.4, 3.2);
+  key.target.position.set(0.85, 0.5, 0.3);
   key.castShadow = true;
   key.shadow.mapSize.set(2048, 2048);
   const sc = key.shadow.camera;
-  sc.left = -2.2; sc.right = 2.2; sc.top = 2.2; sc.bottom = -2.2; sc.near = 1; sc.far = 12;
+  sc.left = -2.6; sc.right = 2.6; sc.top = 2.6; sc.bottom = -2.6; sc.near = 1; sc.far = 13;
   key.shadow.bias = -0.0003;
   key.shadow.normalBias = 0.02;
   key.shadow.radius = 3;
@@ -196,26 +210,28 @@ export function createWorld(renderer) {
     s.rotation.z = rot;
     cell.add(s);
   };
-  const bx0 = -1.15, bx1 = 1.75, by0 = -1.45, by1 = 1.45, bw = 0.08;
+  const bx0 = -1.15, bx1 = 2.85, by0 = -1.92, by1 = 1.45, bw = 0.08;
   stripe(bx1 - bx0, bw, (bx0 + bx1) / 2, by0, 0);
   stripe(bx1 - bx0, bw, (bx0 + bx1) / 2, by1, 0);
   stripe(by1 - by0, bw, bx0, 0, Math.PI / 2);
   stripe(by1 - by0, bw, bx1, 0, Math.PI / 2);
 
-  // ----- robot riser -----
-  const riser = m(mergeGeometries([
-    box(0.46, 0.46, 0.03, [0, 0, -0.015], 0.006),
-    box(0.3, 0.3, RISER_H - 0.06, [0, 0, -RISER_H / 2], 0.01),
-    box(0.6, 0.6, 0.03, [0, 0, FLOOR_Z + 0.015], 0.006),
-  ]), mats.steel);
-  cell.add(riser);
-  const gussets = [];
-  for (let i = 0; i < 4; i++) {
-    const g = box(0.012, 0.13, 0.2, [0, 0.21, FLOOR_Z + 0.13]);
-    g.rotateZ((i * Math.PI) / 2);
-    gussets.push(g);
+  // ----- robot risers -----
+  const riserGeo = [];
+  for (const b of ROBOT_BASES) {
+    riserGeo.push(
+      box(0.46, 0.46, 0.03, [b.x, b.y, -0.015], 0.006),
+      box(0.3, 0.3, RISER_H - 0.06, [b.x, b.y, -RISER_H / 2], 0.01),
+      box(0.6, 0.6, 0.03, [b.x, b.y, FLOOR_Z + 0.015], 0.006),
+    );
+    for (let i = 0; i < 4; i++) {
+      const g = box(0.012, 0.13, 0.2, [0, 0.21, FLOOR_Z + 0.13]);
+      g.rotateZ((i * Math.PI) / 2);
+      g.translate(b.x, b.y, 0);
+      riserGeo.push(g);
+    }
   }
-  cell.add(m(mergeGeometries(gussets), mats.steel));
+  cell.add(m(mergeGeometries(riserGeo), mats.steel));
 
   // ----- work table -----
   const { x0, x1, y0, y1 } = TABLE;
@@ -234,12 +250,12 @@ export function createWorld(renderer) {
   legs.push(box(tw - 0.08, td - 0.08, 0.02, [(x0 + x1) / 2, 0, FLOOR_Z + 0.16]));
   cell.add(m(mergeGeometries(legs), mats.alu));
 
-  // ----- sorting trays -----
+  // ----- sorting trays and the shared transfer tray -----
   const trays = [];
   for (const def of TRAY_DEFS) {
     const g = new THREE.Group();
     g.position.set(def.x, def.y, 0);
-    const inner = TRAY_INNER, wall = 0.012, outer = inner + 2 * wall;
+    const inner = def.inner, wall = 0.012, outer = inner + 2 * wall;
     const trayMat = new THREE.MeshStandardMaterial({ color: def.color, roughness: 0.5, metalness: 0.05 });
     const parts = [
       box(outer, outer, TRAY_FLOOR, [0, 0, TRAY_FLOOR / 2]),
@@ -254,6 +270,9 @@ export function createWorld(renderer) {
     cell.add(g);
     trays.push({ ...def, group: g, mesh: tm, inner });
   }
+
+  const conveyor = buildConveyor(cell, mats);
+  const bin = buildBin(cell);
 
   // ----- safety fence (back and left side) -----
   const fenceTex = meshTexture();
@@ -283,26 +302,31 @@ export function createWorld(renderer) {
     rail.translate(cx, cy, FLOOR_Z + fenceH - 0.04);
     postGeo.push(rail);
   };
-  const fx0 = -1.4, fy0 = -1.7, fy1 = 1.7, fx1 = 2.0;
+  const fx0 = -1.4, fy0 = -1.7, fy1 = 1.7, fx1 = 3.1;
   const step = (fy1 - fy0) / 3;
-  for (let i = 0; i < 3; i++) addPanel(fx0, fy0 + i * step, fx0, fy0 + (i + 1) * step);
-  const step2 = (fx1 - fx0) / 3;
-  for (let i = 0; i < 3; i++) addPanel(fx0 + i * step2, fy1, fx0 + (i + 1) * step2, fy1);
+  for (let i = 0; i < 3; i++) {
+    addPanel(fx0, fy0 + i * step, fx0, fy0 + (i + 1) * step);
+    addPanel(fx1, fy0 + i * step, fx1, fy0 + (i + 1) * step);
+  }
+  const step2 = (fx1 - fx0) / 5;
+  for (let i = 0; i < 5; i++) addPanel(fx0 + i * step2, fy1, fx0 + (i + 1) * step2, fy1);
   cell.add(m(mergeGeometries(postGeo), mats.yellow));
 
-  // ----- controller cabinet + stack light -----
-  const cab = new THREE.Group();
-  cab.position.set(-0.95, 1.05, FLOOR_Z);
-  cab.rotation.z = -Math.PI / 2;
-  cab.add(m(mergeGeometries([box(0.6, 0.5, 1.0, [0, 0, 0.55], 0.01), box(0.64, 0.54, 0.08, [0, 0, 0.04])]), mats.cabinet));
-  const vents = [];
-  for (let i = 0; i < 6; i++) vents.push(box(0.3, 0.006, 0.012, [0, -0.252, 0.25 + i * 0.03]));
-  vents.push(box(0.12, 0.006, 0.12, [0.16, -0.252, 0.85]));
-  cab.add(m(mergeGeometries(vents), mats.dark));
-  const sw = m(new THREE.CylinderGeometry(0.035, 0.035, 0.03, 24), new THREE.MeshStandardMaterial({ color: 0xc23a2a, roughness: 0.4 }));
-  sw.position.set(-0.16, -0.26, 0.85);
-  cab.add(sw);
-  cell.add(cab);
+  // ----- one controller cabinet per robot + stack light -----
+  for (const cx of [-0.95, 2.65]) {
+    const cab = new THREE.Group();
+    cab.position.set(cx, 1.05, FLOOR_Z);
+    cab.rotation.z = -Math.PI / 2;
+    cab.add(m(mergeGeometries([box(0.6, 0.5, 1.0, [0, 0, 0.55], 0.01), box(0.64, 0.54, 0.08, [0, 0, 0.04])]), mats.cabinet));
+    const vents = [];
+    for (let i = 0; i < 6; i++) vents.push(box(0.3, 0.006, 0.012, [0, -0.252, 0.25 + i * 0.03]));
+    vents.push(box(0.12, 0.006, 0.12, [0.16, -0.252, 0.85]));
+    cab.add(m(mergeGeometries(vents), mats.dark));
+    const sw = m(new THREE.CylinderGeometry(0.035, 0.035, 0.03, 24), new THREE.MeshStandardMaterial({ color: 0xc23a2a, roughness: 0.4 }));
+    sw.position.set(-0.16, -0.26, 0.85);
+    cab.add(sw);
+    cell.add(cab);
+  }
 
   const stack = new THREE.Group();
   stack.position.set(-0.95, 0.85, FLOOR_Z + 1.1);
@@ -328,5 +352,100 @@ export function createWorld(renderer) {
   };
   setStackLight('amber');
 
-  return { scene, cell, key, trays, table: top, setStackLight };
+  return { scene, cell, key, trays, table: top, conveyor, bin, setStackLight };
+}
+
+function beltTexture() {
+  const t = canvasTex(128, (ctx, s) => {
+    ctx.fillStyle = '#1c1e21';
+    ctx.fillRect(0, 0, s, s);
+    const img = ctx.getImageData(0, 0, s, s);
+    const r = rng(11);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const n = (r() - 0.5) * 14;
+      img.data[i] += n; img.data[i + 1] += n; img.data[i + 2] += n;
+    }
+    ctx.putImageData(img, 0, 0);
+    // moulded cross cleats make the belt motion readable
+    ctx.fillStyle = '#34373c';
+    ctx.fillRect(0, 0, s, 10);
+    ctx.fillStyle = '#0d0e10';
+    ctx.fillRect(0, 10, s, 3);
+  });
+  return t;
+}
+
+// Flat belt conveyor: frame, rollers, drive motor, guide rails and an animated belt surface.
+function buildConveyor(cell, mats) {
+  const C = CONVEYOR;
+  const len = C.y0 - C.y1;
+  const cy = (C.y0 + C.y1) / 2;
+  const g = new THREE.Group();
+  const frame = [
+    box(0.025, len + 0.06, 0.06, [C.x - C.width / 2 - 0.015, cy, C.z - 0.035]),
+    box(0.025, len + 0.06, 0.06, [C.x + C.width / 2 + 0.015, cy, C.z - 0.035]),
+    // feet resting on the table at the infeed end, full legs past the table edge
+    box(0.03, 0.03, C.z - 0.065, [C.x - 0.09, C.y0 - 0.05, (C.z - 0.065) / 2]),
+    box(0.03, 0.03, C.z - 0.065, [C.x + 0.09, C.y0 - 0.05, (C.z - 0.065) / 2]),
+    box(0.035, 0.035, C.z - 0.065 - FLOOR_Z, [C.x - 0.09, C.y1 + 0.13, (C.z - 0.065 + FLOOR_Z) / 2]),
+    box(0.035, 0.035, C.z - 0.065 - FLOOR_Z, [C.x + 0.09, C.y1 + 0.13, (C.z - 0.065 + FLOOR_Z) / 2]),
+    box(0.21, 0.035, 0.035, [C.x, C.y1 + 0.13, FLOOR_Z + 0.25]),
+  ];
+  g.add(m(mergeGeometries(frame), mats.alu));
+  const guides = [
+    box(0.008, len - 0.04, 0.022, [C.x - C.width / 2 - 0.004, cy - 0.02, C.z + 0.016]),
+    box(0.008, len - 0.04, 0.022, [C.x + C.width / 2 + 0.004, cy - 0.02, C.z + 0.016]),
+  ];
+  g.add(m(mergeGeometries(guides), mats.yellow));
+  for (const y of [C.y0, C.y1]) {
+    const roller = m(new THREE.CylinderGeometry(0.028, 0.028, C.width + 0.01, 24).rotateZ(Math.PI / 2), mats.alu);
+    roller.position.set(C.x, y, C.z - 0.028);
+    g.add(roller);
+  }
+  const motor = m(mergeGeometries([
+    new THREE.CylinderGeometry(0.035, 0.035, 0.11, 24).rotateZ(Math.PI / 2).translate(C.x + C.width / 2 + 0.085, C.y0, C.z - 0.03).toNonIndexed(),
+    box(0.05, 0.07, 0.07, [C.x + C.width / 2 + 0.04, C.y0, C.z - 0.03]),
+  ]), mats.dark);
+  g.add(motor);
+  const tex = beltTexture();
+  tex.repeat.set(1, len / 0.12);
+  const beltMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0.05 });
+  const belt = m(new THREE.PlaneGeometry(C.width, len), beltMat, false, true);
+  belt.position.set(C.x, cy, C.z);
+  belt.name = 'conveyor';
+  g.add(belt);
+  // the belt's underside and the wrap around the rollers
+  const under = m(box(C.width, len, 0.05, [C.x, cy, C.z - 0.028]), new THREE.MeshStandardMaterial({ color: 0x17181a, roughness: 0.9 }));
+  g.add(under);
+  cell.add(g);
+  return {
+    mesh: belt,
+    // scroll the belt texture; one texture repeat is 0.12 m of belt
+    update(dt) { tex.offset.y = (tex.offset.y + (C.speed * dt) / 0.12) % 1; },
+  };
+}
+
+function buildBin(cell) {
+  const B = BIN;
+  const h = B.top - B.floor + 0.04;
+  const mat = new THREE.MeshStandardMaterial({ color: 0x3b5a7a, roughness: 0.55, metalness: 0.3 });
+  const z0 = B.floor - 0.04;
+  const w = B.wall;
+  const parts = [
+    box(B.sx + 2 * w, B.sy + 2 * w, 0.04, [B.x, B.y, z0 + 0.02]),
+    box(B.sx + 2 * w, w, h, [B.x, B.y - B.sy / 2 - w / 2, z0 + h / 2]),
+    box(B.sx + 2 * w, w, h, [B.x, B.y + B.sy / 2 + w / 2, z0 + h / 2]),
+    box(w, B.sy, h, [B.x - B.sx / 2 - w / 2, B.y, z0 + h / 2]),
+    box(w, B.sy, h, [B.x + B.sx / 2 + w / 2, B.y, z0 + h / 2]),
+  ];
+  const binMesh = m(mergeGeometries(parts), mat);
+  binMesh.name = 'bin';
+  cell.add(binMesh);
+  // casters
+  const wheels = [];
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
+    wheels.push(new THREE.CylinderGeometry(0.025, 0.025, 0.02, 16).rotateZ(Math.PI / 2).translate(B.x + sx * (B.sx / 2 - 0.03), B.y + sy * (B.sy / 2 - 0.03), FLOOR_Z + 0.025).toNonIndexed());
+  }
+  cell.add(m(mergeGeometries(wheels), new THREE.MeshStandardMaterial({ color: 0x111214, roughness: 0.8 })));
+  return { mesh: binMesh };
 }
