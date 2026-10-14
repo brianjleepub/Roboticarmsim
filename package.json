@@ -1,0 +1,16 @@
+{
+  "name": "robotic-arm-sim",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mobile-first 3D simulator of a 6-axis industrial robot arm (jog, IK, pick & place).",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/build.mjs --watch",
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10",
+    "three": "0.180.0"
+  }
+}
